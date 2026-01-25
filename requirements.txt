@@ -1,0 +1,11 @@
+# Core
+numpy
+opencv-python-headless
+python-dotenv
+
+# Web UI
+fastapi
+uvicorn[standard]
+
+# PyTorch + YOLO (Ultralytics)
+ultralytics

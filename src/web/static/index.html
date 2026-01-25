@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Пешеходный мониторинг — интерфейс</title>
+  <link rel="stylesheet" href="/static/styles.css?v=5" />
+</head>
+<body>
+  <div class="layout">
+    <header class="header">
+      <div class="title">Автоматизированная система мониторинга пешеходных нарушений</div>
+      <div class="subtitle">
+        Реальное время: видео-стрим + разметка областей интереса + симуляция красного сигнала
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="video-card">
+        <div class="video-wrap">
+          <img id="video" src="/stream.mjpg" alt="video stream" />
+          <canvas id="overlay"></canvas>
+        </div>
+        <div class="hint">
+          Поток обрабатывается постоянно. После сохранения разметки параметры применяются сразу к последующим кадрам.
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-block">
+          <div class="panel-title">Статус</div>
+          <div id="status" class="status">Загрузка…</div>
+          <div class="note">
+            Если кнопки/режимы «не работают», открой DevTools → Console и проверь сообщения.
+            Также сделай hard refresh (Ctrl+F5), чтобы исключить кэш старого JS.
+          </div>
+        </div>
+
+        <div class="panel-block">
+          <div class="panel-title">Управление воспроизведением</div>
+          <div class="btn-row">
+            <button id="pause" class="btn secondary" type="button">Пауза</button>
+            <button id="resume" class="btn secondary" type="button">Продолжить</button>
+            <button id="restart" class="btn secondary" type="button">С начала (для файла)</button>
+          </div>
+          <div class="note">
+            Для файла воспроизведение идёт в реальном времени и зацикливается. Для RTSP/камеры «С начала» не применяется.
+          </div>
+        </div>
+
+        <div class="panel-block">
+          <div class="panel-title">Режим разметки</div>
+          <div class="btn-row">
+            <button id="mode-crosswalk" class="btn" type="button">Зона перехода (полигон)</button>
+            <button id="mode-roi" class="btn" type="button">ROI светофора</button>
+            <button id="mode-manualred" class="btn" type="button">Симуляция красного</button>
+          </div>
+
+          <div id="crosswalk-tools" class="toolbox">
+            <div class="btn-row">
+              <button id="crosswalk-save" class="btn secondary" type="button">Сохранить полигон</button>
+              <button id="crosswalk-undo" class="btn secondary" type="button">Шаг назад</button>
+              <button id="crosswalk-clear" class="btn secondary" type="button">Очистить черновик</button>
+            </div>
+            <div class="note">Кликайте по кадру, чтобы добавить точки. Минимум — 3 точки.</div>
+          </div>
+
+          <div id="manualred-tools" class="toolbox">
+            <div class="row">
+              <label for="manualred-radius">Радиус круга:</label>
+              <input id="manualred-radius" type="range" min="6" max="80" value="14" />
+              <span id="manualred-radius-val" class="pill">14</span>
+            </div>
+            <div class="btn-row">
+              <button id="manualred-disable" class="btn secondary" type="button">Выключить симуляцию</button>
+            </div>
+            <div class="note">
+              В режиме симуляции клик по кадру ставит красный круг и включает симуляцию.
+              Чтобы «сработало как красный светофор», размести круг внутри ROI светофора.
+            </div>
+          </div>
+
+          <div class="btn-row">
+            <button id="reset" class="btn secondary" type="button">Сбросить всё</button>
+          </div>
+        </div>
+
+        <div class="panel-block">
+          <div class="panel-title">Текущие параметры</div>
+          <pre id="config" class="config"></pre>
+        </div>
+
+        <div class="panel-block">
+          <div class="panel-title">Что делать после настройки</div>
+          <ul class="tips">
+            <li>Ничего дополнительно «запускать» не нужно: поток уже воспроизводится и обрабатывается.</li>
+            <li>После сохранения полигона/ROI на видео появятся красные контуры (рисуются на backend поверх кадра).</li>
+            <li>Для проверки «красного» — включи симуляцию и поставь круг внутри ROI светофора.</li>
+          </ul>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/static/app.js?v=5"></script>
+</body>
+</html>
