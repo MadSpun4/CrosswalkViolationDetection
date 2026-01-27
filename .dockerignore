@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.swp
+*.swo
+.env
+.venv/
+venv/
+.idea/
+.vscode/
+dist/
+build/
+*.egg-info/
+input_data/
