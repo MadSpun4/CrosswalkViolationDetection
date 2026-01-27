@@ -31,13 +31,12 @@ def index():
         return f.read()
 
 
-@app.get("/stream.mjpg")
-def stream():
+def _mjpeg(gen_func):
     boundary = "frame"
 
     def gen():
         while True:
-            jpg = hub.get_latest(timeout=1.0)
+            jpg = gen_func(timeout=1.0)
             if jpg is None:
                 time.sleep(0.05)
                 continue
@@ -46,6 +45,16 @@ def stream():
                    f"Content-Length: {len(jpg)}\r\n\r\n").encode("utf-8") + jpg + b"\r\n"
 
     return StreamingResponse(gen(), media_type=f"multipart/x-mixed-replace; boundary={boundary}")
+
+
+@app.get("/stream.mjpg")
+def stream_raw():
+    return _mjpeg(hub.get_latest_raw)
+
+
+@app.get("/stream_processed.mjpg")
+def stream_processed():
+    return _mjpeg(hub.get_latest_processed)
 
 
 class CrosswalkPayload(BaseModel):
@@ -74,7 +83,6 @@ def get_config():
     return {
         "crosswalk": cal.crosswalk,
         "traffic_light_roi": cal.traffic_light_roi,
-        "tl_brightness_threshold": settings.tl_brightness_threshold,
         "manual_red": {
             "enabled": cal.manual_red.enabled,
             "x": cal.manual_red.x,

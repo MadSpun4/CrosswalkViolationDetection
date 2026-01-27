@@ -24,6 +24,12 @@ const btnPause = $("pause");
 const btnResume = $("resume");
 const btnRestart = $("restart");
 
+const btnViewRaw = $("view-raw");
+const btnViewProcessed = $("view-processed");
+
+let viewMode = "raw"; // raw | processed
+
+
 const cfgPre = $("config");
 const statusDiv = $("status");
 
@@ -36,6 +42,20 @@ let dragStart = null;
 // Frame dimensions (frame coordinates) provided by backend
 let frameW = 0;
 let frameH = 0;
+
+function setViewMode(vm) {
+  viewMode = vm;
+  btnViewRaw?.classList.toggle("active", viewMode === "raw");
+  btnViewProcessed?.classList.toggle("active", viewMode === "processed");
+  // Force reload MJPEG stream by adding cache-busting query param
+  const ts = Date.now();
+  if (viewMode === "processed") {
+    video.src = `/stream_processed.mjpg?ts=${ts}`;
+  } else {
+    video.src = `/stream.mjpg?ts=${ts}`;
+  }
+  resizeCanvasToVideo();
+}
 
 function setMode(m) {
   mode = m;
@@ -280,6 +300,11 @@ radiusSlider?.addEventListener("input", () => {
   if (radiusVal) radiusVal.textContent = radiusSlider.value;
 });
 
+
+// View mode controls
+btnViewRaw?.addEventListener("click", () => setViewMode("raw"));
+btnViewProcessed?.addEventListener("click", () => setViewMode("processed"));
+
 // Global controls
 btnReset?.addEventListener("click", async () => {
   try {
@@ -340,5 +365,6 @@ video.addEventListener("load", () => resizeCanvasToVideo());
 
 // Start
 setMode("crosswalk");
+setViewMode("raw");
 refreshAll();
 setInterval(() => { resizeCanvasToVideo(); refreshAll(); }, 1500);

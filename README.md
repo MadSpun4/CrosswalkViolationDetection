@@ -107,3 +107,9 @@ If UI FPS is much lower than source FPS, set `STREAM_MAX_WIDTH` (e.g., 480) to d
 
 ## Crosswalk membership
 A pedestrian is considered inside the crosswalk if the *bottom edge* of their bbox lies inside the polygon (approximated by bottom-left/center/right points).
+
+## Stream modes (v6)
+- /stream.mjpg: normal stream (overlays), updates every frame sent to UI.
+- /stream_processed.mjpg: debug stream; updates only on frames actually fed to the pedestrian detector (NN) and shows the preprocessed frame.
+
+Use the UI buttons «Обычный» / «Обработанный (preproc + NN)» to switch.

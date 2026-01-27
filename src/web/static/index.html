@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Пешеходный мониторинг — интерфейс</title>
-  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
 </head>
 <body>
   <div class="layout">
@@ -47,6 +47,18 @@
             Для файла воспроизведение идёт в реальном времени и зацикливается. Для RTSP/камеры «С начала» не применяется.
           </div>
         </div>
+
+<div class="panel-block">
+  <div class="panel-title">Режим вывода</div>
+  <div class="btn-row">
+    <button id="view-raw" class="btn active" type="button">Обычный</button>
+    <button id="view-processed" class="btn" type="button">Обработанный (preproc + NN)</button>
+  </div>
+  <div class="note">
+    В режиме «Обработанный» отображаются только кадры, которые реально прошли предобработку и были поданы на нейросеть
+    (частота соответствует FPS(детекция) в статусе). fileciteturn5file3
+  </div>
+</div>
 
         <div class="panel-block">
           <div class="panel-title">Режим разметки</div>
@@ -102,6 +114,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>

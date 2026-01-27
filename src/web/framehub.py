@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from threading import Thread, Event, Lock
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 import cv2
 import numpy as np
@@ -37,10 +37,13 @@ def _env_float(name: str, default: float) -> float:
 class FrameHub:
     """Background worker.
 
-    Key change in v5:
-    - We always run per-frame logic (traffic light + rule evaluation) to keep UI responsive.
-    - Heavy pedestrian detection is throttled *inside Pipeline* (PED_DETECT_STRIDE),
-      so `process_fps` stays close to `output_fps` even when detection is sparse.
+    v6 adds two output streams:
+    - RAW stream: every output frame (with overlays), as close to camera FPS as possible.
+    - PROCESSED stream: only frames that were *actually fed to the pedestrian detector* (NN),
+      rendered after preprocessing, with overlays. This is for debugging preprocessing/NN input.
+
+    This matches the thesis pipeline separation: preprocessing prepares the input for recognition
+    algorithms (Viola-Jones / YOLO). fileciteturn5file12
     """
 
     def __init__(self, settings: Settings, store: CalibrationStore) -> None:
@@ -55,8 +58,11 @@ class FrameHub:
         self.stream_max_height = max(0, _env_int("STREAM_MAX_HEIGHT", 0))
 
         self._lock = Lock()
-        self._latest_jpeg: Optional[bytes] = None
-        self._new_frame = Event()
+        self._latest_jpeg_raw: Optional[bytes] = None
+        self._latest_jpeg_processed: Optional[bytes] = None
+        self._new_raw = Event()
+        self._new_processed = Event()
+
         self._stop = Event()
         self._paused = Event()
         self._restart = Event()
@@ -67,8 +73,8 @@ class FrameHub:
         self._frame_h = 0
         self._fps_src = 0.0
         self._fps_out = 0.0
-        self._fps_proc = 0.0           # per-frame logic fps (pipeline called each frame)
-        self._fps_ped_det = 0.0        # how often heavy pedestrian detector was invoked
+        self._fps_proc = 0.0            # per-frame logic fps
+        self._fps_ped_det = 0.0         # how often NN detector runs
         self._paused_flag = False
         self._last_err: Optional[str] = None
 
@@ -97,11 +103,17 @@ class FrameHub:
     def restart(self) -> None:
         self._restart.set()
 
-    def get_latest(self, timeout: float = 1.0) -> Optional[bytes]:
-        self._new_frame.wait(timeout=timeout)
-        self._new_frame.clear()
+    def get_latest_raw(self, timeout: float = 1.0) -> Optional[bytes]:
+        self._new_raw.wait(timeout=timeout)
+        self._new_raw.clear()
         with self._lock:
-            return self._latest_jpeg
+            return self._latest_jpeg_raw
+
+    def get_latest_processed(self, timeout: float = 1.0) -> Optional[bytes]:
+        self._new_processed.wait(timeout=timeout)
+        self._new_processed.clear()
+        with self._lock:
+            return self._latest_jpeg_processed
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
@@ -147,7 +159,7 @@ class FrameHub:
         frame_dt = 1.0 / float(fps)
 
         next_ts = time.time()      # pacing for file sources
-        out_next_ts = time.time()  # output limiter
+        out_next_ts = time.time()  # output limiter for RAW stream
 
         # FPS estimation windows
         t0_out = time.time()
@@ -187,7 +199,7 @@ class FrameHub:
                 self._frame_w = int(w)
                 self._frame_h = int(h)
 
-            # File pacing only (RTSP/camera are real-time by nature)
+            # File pacing only
             if src_is_file:
                 now = time.time()
                 if now < next_ts:
@@ -208,24 +220,20 @@ class FrameHub:
                     thickness=-1,
                 )
 
-            # Run per-frame logic (pipeline decides internally whether to invoke heavy detector)
+            # Run pipeline per-frame; request preprocessed frame for debug stream
             try:
-                before_i = self.pipeline._frame_i  # internal; ok for scaffold status
                 last_result = self.pipeline.process_frame(
                     frame_for_pipeline,
                     traffic_light_roi=cal.traffic_light_roi,
                     crosswalk_polygon=cal.crosswalk,
+                    include_preprocessed=True,
                 )
-                after_i = self.pipeline._frame_i
 
-                # Detect calls are made when pipeline internal counter hits stride.
-                # We approximate ped-det count by checking age reset (implementation detail).
-                # For UI, this is sufficient. (c_det is used for fps.)
-                # We increment when pipeline's internal frame index % stride == 0.
-                if (after_i % max(1, self.settings.ped_detect_stride)) == 0:
+                # Count NN detector invocations
+                if last_result.ped_detector_ran:
                     c_det += 1
 
-                if last_result is not None and getattr(last_result, "alert", False):
+                if last_result.alert:
                     self.pipeline.alerter.notify(last_result.message)
                     with self._lock:
                         self._last_alert_ts = time.time()
@@ -233,6 +241,7 @@ class FrameHub:
             except Exception as e:
                 self._last_err = f"pipeline error: {e!r}"
 
+            # Process FPS (per-frame logic)
             c_proc += 1
             if time.time() - t0_proc >= 2.0:
                 with self._lock:
@@ -240,33 +249,50 @@ class FrameHub:
                 t0_proc = time.time()
                 c_proc = 0
 
+            # Detector FPS (NN)
             if time.time() - t0_det >= 2.0:
                 with self._lock:
                     self._fps_ped_det = c_det / (time.time() - t0_det)
                 t0_det = time.time()
                 c_det = 0
 
-            # Output limiter
+            # RAW output limiter
             if self.output_max_fps and self.output_max_fps > 0:
                 now = time.time()
                 if now < out_next_ts:
-                    continue
-                out_next_ts = now + (1.0 / self.output_max_fps)
+                    # Even if RAW is rate-limited, we still may publish PROCESSED frames below.
+                    pass
+                else:
+                    out_next_ts = now + (1.0 / self.output_max_fps)
 
-            # Draw overlays and encode
-            frame_vis = self._draw_overlays(frame_for_pipeline, cal, last_result)
-            frame_vis = self._resize_for_stream(frame_vis)
-
-            ok2, buf = cv2.imencode(
+            # Build RAW frame (always)
+            frame_raw_vis = self._draw_overlays(frame_for_pipeline, cal, last_result)
+            frame_raw_vis = self._resize_for_stream(frame_raw_vis)
+            ok_raw, buf_raw = cv2.imencode(
                 ".jpg",
-                frame_vis,
+                frame_raw_vis,
                 [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
             )
-            if ok2:
+            if ok_raw:
                 with self._lock:
-                    self._latest_jpeg = buf.tobytes()
-                self._new_frame.set()
+                    self._latest_jpeg_raw = buf_raw.tobytes()
+                self._new_raw.set()
 
+            # Build PROCESSED frame (only when NN ran on this frame)
+            if last_result is not None and last_result.ped_detector_ran and last_result.preprocessed_bgr is not None:
+                frame_pp_vis = self._draw_overlays(last_result.preprocessed_bgr, cal, last_result)
+                frame_pp_vis = self._resize_for_stream(frame_pp_vis)
+                ok_pp, buf_pp = cv2.imencode(
+                    ".jpg",
+                    frame_pp_vis,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
+                )
+                if ok_pp:
+                    with self._lock:
+                        self._latest_jpeg_processed = buf_pp.tobytes()
+                    self._new_processed.set()
+
+            # Output FPS is measured on RAW stream publications (what UI usually consumes)
             c_out += 1
             if time.time() - t0_out >= 2.0:
                 with self._lock:
