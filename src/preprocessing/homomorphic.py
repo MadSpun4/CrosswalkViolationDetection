@@ -5,11 +5,6 @@ import numpy as np
 
 
 def homomorphic_filter(frame_bgr: np.ndarray, gamma_l: float = 0.7, gamma_h: float = 1.5, c: float = 1.0, d0: float = 30.0) -> np.ndarray:
-    """Basic homomorphic filtering for illumination normalization.
-
-    This is a scaffold implementation: it is intentionally conservative and can be refined later
-    (e.g., with better parameterization or ROI-based processing).
-    """
     img = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)
     y, cr, cb = cv2.split(img)
 

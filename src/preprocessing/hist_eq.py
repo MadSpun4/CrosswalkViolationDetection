@@ -5,7 +5,6 @@ import numpy as np
 
 
 def histogram_equalization(frame_bgr: np.ndarray) -> np.ndarray:
-    """Histogram equalization on luminance channel (Y) to improve contrast."""
     img = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)
     y, cr, cb = cv2.split(img)
     y_eq = cv2.equalizeHist(y)

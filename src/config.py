@@ -70,33 +70,37 @@ class Settings:
 
     yolo_model: str
     yolo_conf: float
+    yolo_person_class: int
 
-    # Traffic light detection thresholds
-    tl_brightness_threshold: float          # grayscale mean threshold
-    tl_red_fraction_threshold: float        # fraction of "red-ish" pixels in ROI
-    tl_hsv_s_threshold: int                 # saturation gate for red mask
-    tl_hsv_v_threshold: int                 # value gate for red mask
+    # ROI-кандидаты Viola-Jones
+    viola_cascade_path: str
+    viola_scale_factor: float
+    viola_min_neighbors: int
+    viola_min_width: int
+    viola_min_height: int
+    viola_padding: float
 
-    # Pedestrian detection throttling (does NOT throttle UI / per-frame logic)
-    ped_detect_stride: int                  # 1 = run detector each frame, 4 = every 4th frame
-    ped_hold_frames: int                    # how long to keep last bbox if detector skipped (in frames)
+    # Пороги светофора
+    tl_brightness_threshold: float          # средняя яркость ROI
+    tl_detection_mode: str                  # режим: brightness | color
+    tl_color_fraction_threshold: float      # доля красных/зелёных пикселей
+    tl_color_margin: float                  # перевес ведущего цвета
+    tl_color_min_saturation: int            # минимум насыщенности HSV
+    tl_color_min_value: int                 # минимум яркости HSV
+    traffic_light_inverted: bool            # зелёный считается запретом
 
-    alert_mode: str
-    alert_cooldown_sec: float
+    # Пропуск кадров
+    process_stride: int                     # 1 = каждый кадр
+    display_preprocessed: bool              # показывать кадр после предобработки
 
     @staticmethod
     def from_env() -> "Settings":
-        # Allow python-dotenv if user runs outside Docker
+        # Поддержка запуска вне Docker.
         try:
             from dotenv import load_dotenv
             load_dotenv()
         except Exception:
             pass
-
-        # Backward compatibility: PROCESS_STRIDE from older versions maps to PED_DETECT_STRIDE.
-        ped_stride = _env_int("PED_DETECT_STRIDE", 0)
-        if ped_stride <= 0:
-            ped_stride = _env_int("PROCESS_STRIDE", 1)
 
         return Settings(
             video_source=_env_str("VIDEO_SOURCE", "/app/input_data/test.mp4"),
@@ -110,17 +114,23 @@ class Settings:
 
             yolo_model=_env_str("YOLO_MODEL", ""),
             yolo_conf=_env_float("YOLO_CONF", 0.35),
+            yolo_person_class=_env_int("YOLO_PERSON_CLASS", 0),
 
-            # Default values align with the thesis scaffolding, but we add a red-color gate
-            # to prevent "bright but not red" false positives inside ROI.
+            viola_cascade_path=_env_str("VIOLA_CASCADE_PATH", ""),
+            viola_scale_factor=_env_float("VIOLA_SCALE_FACTOR", 1.1),
+            viola_min_neighbors=_env_int("VIOLA_MIN_NEIGHBORS", 3),
+            viola_min_width=_env_int("VIOLA_MIN_WIDTH", 24),
+            viola_min_height=_env_int("VIOLA_MIN_HEIGHT", 48),
+            viola_padding=_env_float("VIOLA_PADDING", 0.35),
+
             tl_brightness_threshold=_env_float("TL_BRIGHTNESS_T", 60.0),
-            tl_red_fraction_threshold=_env_float("TL_RED_FRACTION_T", 0.010),
-            tl_hsv_s_threshold=_env_int("TL_HSV_S_T", 90),
-            tl_hsv_v_threshold=_env_int("TL_HSV_V_T", 90),
+            tl_detection_mode=_env_str("TL_DETECTION_MODE", "color").strip().lower(),
+            tl_color_fraction_threshold=_env_float("TL_COLOR_FRACTION_T", 0.003),
+            tl_color_margin=_env_float("TL_COLOR_MARGIN", 1.25),
+            tl_color_min_saturation=max(0, min(255, _env_int("TL_COLOR_MIN_S", 70))),
+            tl_color_min_value=max(0, min(255, _env_int("TL_COLOR_MIN_V", 80))),
+            traffic_light_inverted=_env_bool("TRAFFIC_LIGHT_INVERTED", False),
 
-            ped_detect_stride=max(1, int(ped_stride)),
-            ped_hold_frames=max(0, _env_int("PED_HOLD_FRAMES", 12)),
-
-            alert_mode=_env_str("ALERT_MODE", "console"),
-            alert_cooldown_sec=_env_float("ALERT_COOLDOWN_SEC", 2.0),
+            process_stride=max(1, _env_int("PROCESS_STRIDE", 1)),
+            display_preprocessed=_env_bool("DISPLAY_PREPROCESSED", True),
         )

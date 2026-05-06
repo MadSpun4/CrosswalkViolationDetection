@@ -6,46 +6,58 @@ const $ = (id) => document.getElementById(id);
 
 const btnCrosswalk = $("mode-crosswalk");
 const btnRoi = $("mode-roi");
-const btnManualRed = $("mode-manualred");
 
 const crosswalkTools = $("crosswalk-tools");
-const manualredTools = $("manualred-tools");
 
 const btnCrosswalkSave = $("crosswalk-save");
-const btnCrosswalkUndo = $("crosswalk-undo");
-const btnCrosswalkClear = $("crosswalk-clear");
-
-const btnManualRedDisable = $("manualred-disable");
-const radiusSlider = $("manualred-radius");
-const radiusVal = $("manualred-radius-val");
 
 const btnReset = $("reset");
 const btnPause = $("pause");
 const btnResume = $("resume");
 const btnRestart = $("restart");
+const btnProcessingSave = $("processing-save");
+const btnAudioEnable = $("audio-enable");
+const btnDisplayPreprocessed = $("display-preprocessed-toggle");
+const btnTrafficLightInvert = $("traffic-light-invert");
+
+const procModeNeural = $("proc-mode-neural");
+const procModeBg = $("proc-mode-bg");
+const procModeCombined = $("proc-mode-combined");
+const preprocessingEnabled = $("preprocessing-enabled");
+const enableHomomorphic = $("enable-homomorphic");
+const enableHistEq = $("enable-hist-eq");
+const enableGaussianBlur = $("enable-gaussian-blur");
+const gaussianKernel = $("gaussian-kernel");
+const yoloConf = $("yolo-conf");
+const processStride = $("process-stride");
 
 const cfgPre = $("config");
 const statusDiv = $("status");
 
-let mode = "crosswalk"; // crosswalk | roi | manualred
-let crosswalkDraft = []; // [[x,y],...]
-let roiDraft = null; // {x1,y1,x2,y2}
+let mode = "crosswalk"; // режим: crosswalk или roi
+let crosswalkDraft = []; // точки полигона
+let roiDraft = null; // прямоугольник ROI
 let isDragging = false;
 let dragStart = null;
 
-// Frame dimensions (frame coordinates) provided by backend
+// Размер кадра с сервера
 let frameW = 0;
 let frameH = 0;
+let audioCtx = null;
+let audioEnabled = false;
+let violationSoundTimer = null;
+let violationSoundStopTimer = null;
+let violationSoundRequested = false;
+let currentProcessing = {};
+const VIOLATION_SOUND_REPEAT_MS = 850;
 
 function setMode(m) {
   mode = m;
 
   btnCrosswalk?.classList.toggle("active", mode === "crosswalk");
   btnRoi?.classList.toggle("active", mode === "roi");
-  btnManualRed?.classList.toggle("active", mode === "manualred");
 
   crosswalkTools?.classList.toggle("active", mode === "crosswalk");
-  manualredTools?.classList.toggle("active", mode === "manualred");
 
   if (mode !== "crosswalk") crosswalkDraft = [];
   if (mode !== "roi") roiDraft = null;
@@ -60,15 +72,43 @@ function resizeCanvasToVideo() {
   redraw();
 }
 
-function clientToFrameXY(clientX, clientY) {
+function renderedVideoRect() {
   const rect = video.getBoundingClientRect();
+  const w = frameW || video.naturalWidth || 0;
+  const h = frameH || video.naturalHeight || 0;
+  if (!w || !h || !rect.width || !rect.height) return rect;
+
+  const frameAspect = w / h;
+  const boxAspect = rect.width / rect.height;
+  if (boxAspect > frameAspect) {
+    const width = rect.height * frameAspect;
+    return {
+      left: rect.left + (rect.width - width) / 2,
+      top: rect.top,
+      width,
+      height: rect.height
+    };
+  }
+
+  const height = rect.width / frameAspect;
+  return {
+    left: rect.left,
+    top: rect.top + (rect.height - height) / 2,
+    width: rect.width,
+    height
+  };
+}
+
+function clientToFrameXY(clientX, clientY) {
+  const rect = renderedVideoRect();
   const xOnView = clientX - rect.left;
   const yOnView = clientY - rect.top;
 
-  // Prefer backend status dims; fallback to naturalWidth/Height
+  // Сначала берём размеры сервера
   const w = frameW || video.naturalWidth || 0;
   const h = frameH || video.naturalHeight || 0;
   if (!w || !h) return null;
+  if (xOnView < 0 || yOnView < 0 || xOnView > rect.width || yOnView > rect.height) return null;
 
   const sx = w / rect.width;
   const sy = h / rect.height;
@@ -80,12 +120,16 @@ function clientToFrameXY(clientX, clientY) {
 }
 
 function frameToViewXY(x, y) {
-  const rect = video.getBoundingClientRect();
+  const videoRect = video.getBoundingClientRect();
+  const rect = renderedVideoRect();
   const w = frameW || video.naturalWidth || 1;
   const h = frameH || video.naturalHeight || 1;
   const sx = rect.width / w;
   const sy = rect.height / h;
-  return { x: x * sx, y: y * sy };
+  return {
+    x: (rect.left - videoRect.left) + x * sx,
+    y: (rect.top - videoRect.top) + y * sy
+  };
 }
 
 async function apiJson(url, options = {}) {
@@ -116,20 +160,109 @@ async function apiSetRoi(roi) {
   });
 }
 
-async function apiSetManualRed(payload) {
-  return apiJson("/api/manual_red", {
+async function apiSetProcessing(payload) {
+  return apiJson("/api/processing", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
 }
 
-async function apiDisableManualRed() { return apiJson("/api/manual_red/disable", { method: "POST" }); }
 async function apiReset() { return apiJson("/api/reset", { method: "POST" }); }
 
 async function apiPause() { await apiJson("/api/control/pause", { method: "POST" }); }
 async function apiResume() { await apiJson("/api/control/resume", { method: "POST" }); }
 async function apiRestart() { await apiJson("/api/control/restart", { method: "POST" }); }
+
+async function enableAudio() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  if (!audioCtx) audioCtx = new AudioContextClass();
+  if (audioCtx.state === "suspended") await audioCtx.resume();
+  audioEnabled = true;
+  if (btnAudioEnable) btnAudioEnable.textContent = "Звук включен";
+  if (violationSoundRequested) startViolationSoundLoop();
+}
+
+function playViolationSound() {
+  if (!audioEnabled || !audioCtx) return;
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume().catch(console.error);
+    return;
+  }
+
+  const now = audioCtx.currentTime;
+  const master = audioCtx.createGain();
+  master.gain.setValueAtTime(0.0001, now);
+  master.gain.exponentialRampToValueAtTime(0.18, now + 0.02);
+  master.gain.exponentialRampToValueAtTime(0.0001, now + 0.75);
+  master.connect(audioCtx.destination);
+
+  [0.0, 0.24, 0.48].forEach((offset) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, now + offset);
+    gain.gain.setValueAtTime(0.0001, now + offset);
+    gain.gain.exponentialRampToValueAtTime(1.0, now + offset + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.16);
+    osc.connect(gain);
+    gain.connect(master);
+    osc.start(now + offset);
+    osc.stop(now + offset + 0.18);
+  });
+
+  window.setTimeout(() => {
+    try {
+      master.disconnect();
+    } catch (err) {
+      // Просто отлавливает ошибку отключения уже отключенного узла
+    }
+  }, 900);
+}
+
+function startViolationSoundLoop() {
+  if (!audioEnabled || !audioCtx || violationSoundTimer !== null) return;
+  playViolationSound();
+  violationSoundTimer = window.setInterval(playViolationSound, VIOLATION_SOUND_REPEAT_MS);
+}
+
+function stopViolationSoundLoop() {
+  if (violationSoundTimer !== null) {
+    window.clearInterval(violationSoundTimer);
+    violationSoundTimer = null;
+  }
+  if (violationSoundStopTimer !== null) {
+    window.clearTimeout(violationSoundStopTimer);
+    violationSoundStopTimer = null;
+  }
+}
+
+function syncViolationSound(alertActive, remainingSec = 0) {
+  violationSoundRequested = alertActive;
+
+  if (!alertActive) {
+    stopViolationSoundLoop();
+    return;
+  }
+
+  startViolationSoundLoop();
+
+  if (violationSoundStopTimer !== null) {
+    window.clearTimeout(violationSoundStopTimer);
+  }
+
+  const remainingMs = Number.isFinite(remainingSec) ? Math.max(0, remainingSec * 1000) : 0;
+  if (remainingMs <= 0) return;
+
+  violationSoundStopTimer = window.setTimeout(() => {
+    violationSoundStopTimer = null;
+    if (violationSoundRequested) {
+      violationSoundRequested = false;
+      stopViolationSoundLoop();
+    }
+  }, remainingMs + 150);
+}
 
 function drawPolygon(points) {
   if (!points || points.length === 0) return;
@@ -182,12 +315,6 @@ canvas.addEventListener("click", async (e) => {
       return;
     }
 
-    if (mode === "manualred") {
-      const radius = parseInt(radiusSlider?.value || "14", 10);
-      await apiSetManualRed({ enabled: true, x: pt.x, y: pt.y, radius });
-      await refreshAll();
-      return;
-    }
   } catch (err) {
     console.error(err);
     statusDiv.textContent = `Ошибка: ${err.message || err}`;
@@ -238,7 +365,7 @@ canvas.addEventListener("mouseup", async () => {
   }
 });
 
-// Crosswalk tools
+// Инструменты перехода
 btnCrosswalkSave?.addEventListener("click", async () => {
   if (crosswalkDraft.length < 3) {
     alert("Нужно минимум 3 точки для полигона.");
@@ -255,32 +382,7 @@ btnCrosswalkSave?.addEventListener("click", async () => {
   }
 });
 
-btnCrosswalkUndo?.addEventListener("click", () => {
-  crosswalkDraft.pop();
-  redraw();
-});
-
-btnCrosswalkClear?.addEventListener("click", () => {
-  crosswalkDraft = [];
-  redraw();
-});
-
-// Manual red tools
-btnManualRedDisable?.addEventListener("click", async () => {
-  try {
-    await apiDisableManualRed();
-    await refreshAll();
-  } catch (err) {
-    console.error(err);
-    statusDiv.textContent = `Ошибка: ${err.message || err}`;
-  }
-});
-
-radiusSlider?.addEventListener("input", () => {
-  if (radiusVal) radiusVal.textContent = radiusSlider.value;
-});
-
-// Global controls
+// Общие кнопки
 btnReset?.addEventListener("click", async () => {
   try {
     await apiReset();
@@ -297,30 +399,101 @@ btnReset?.addEventListener("click", async () => {
 btnPause?.addEventListener("click", async () => { try { await apiPause(); await refreshAll(); } catch(e){ console.error(e); } });
 btnResume?.addEventListener("click", async () => { try { await apiResume(); await refreshAll(); } catch(e){ console.error(e); } });
 btnRestart?.addEventListener("click", async () => { try { await apiRestart(); await refreshAll(); } catch(e){ console.error(e); } });
+btnAudioEnable?.addEventListener("click", async () => { try { await enableAudio(); } catch(e){ console.error(e); } });
+document.addEventListener("click", () => { if (!audioEnabled) enableAudio().catch(console.error); }, { once: true });
 
-// Mode buttons
+btnDisplayPreprocessed?.addEventListener("click", async () => {
+  try {
+    await apiSetProcessing({ display_preprocessed: !Boolean(currentProcessing.display_preprocessed) });
+    await refreshAll();
+  } catch (err) {
+    console.error(err);
+    statusDiv.textContent = `Ошибка: ${err.message || err}`;
+  }
+});
+
+btnTrafficLightInvert?.addEventListener("click", async () => {
+  try {
+    await apiSetProcessing({ traffic_light_inverted: !Boolean(currentProcessing.traffic_light_inverted) });
+    await refreshAll();
+  } catch (err) {
+    console.error(err);
+    statusDiv.textContent = `Ошибка: ${err.message || err}`;
+  }
+});
+
+btnProcessingSave?.addEventListener("click", async () => {
+  try {
+    await apiSetProcessing({
+      processing_mode: "neural",
+      preprocessing_enabled: Boolean(preprocessingEnabled?.checked),
+      enable_homomorphic: Boolean(enableHomomorphic?.checked),
+      enable_hist_eq: Boolean(enableHistEq?.checked),
+      enable_gaussian_blur: Boolean(enableGaussianBlur?.checked),
+      gaussian_kernel: parseInt(gaussianKernel?.value || "5", 10),
+      yolo_conf: parseFloat(yoloConf?.value || "0.35"),
+      process_stride: parseInt(processStride?.value || "1", 10),
+      display_preprocessed: Boolean(currentProcessing.display_preprocessed),
+      traffic_light_inverted: Boolean(currentProcessing.traffic_light_inverted)
+    });
+    await refreshAll();
+  } catch (err) {
+    console.error(err);
+    statusDiv.textContent = `Ошибка: ${err.message || err}`;
+  }
+});
+
+// Переключение режима
 btnCrosswalk?.addEventListener("click", () => setMode("crosswalk"));
 btnRoi?.addEventListener("click", () => setMode("roi"));
-btnManualRed?.addEventListener("click", () => setMode("manualred"));
+
+function populateProcessingControls(processing) {
+  if (!processing) return;
+  currentProcessing = { ...processing };
+  const processingInputs = [
+    preprocessingEnabled,
+    enableHomomorphic,
+    enableHistEq,
+    enableGaussianBlur,
+    gaussianKernel,
+    yoloConf,
+    processStride
+  ];
+  if (processingInputs.includes(document.activeElement)) return;
+
+  if (preprocessingEnabled) preprocessingEnabled.checked = Boolean(processing.preprocessing_enabled);
+  if (enableHomomorphic) enableHomomorphic.checked = Boolean(processing.enable_homomorphic);
+  if (enableHistEq) enableHistEq.checked = Boolean(processing.enable_hist_eq);
+  if (enableGaussianBlur) enableGaussianBlur.checked = Boolean(processing.enable_gaussian_blur);
+  if (gaussianKernel) gaussianKernel.value = processing.gaussian_kernel ?? 5;
+  if (yoloConf) yoloConf.value = processing.yolo_conf ?? 0.35;
+  if (processStride) processStride.value = processing.process_stride ?? 1;
+
+  const modeName = processing.processing_mode || "neural";
+  procModeNeural?.classList.toggle("active", modeName === "neural");
+  procModeBg?.classList.toggle("active", modeName === "background");
+  procModeCombined?.classList.toggle("active", modeName === "combined");
+  btnDisplayPreprocessed?.classList.toggle("active", Boolean(processing.display_preprocessed));
+  btnTrafficLightInvert?.classList.toggle("active", Boolean(processing.traffic_light_inverted));
+}
 
 async function refreshAll() {
   try {
     const [cfg, st] = await Promise.all([apiGetConfig(), apiGetStatus()]);
     cfgPre.textContent = JSON.stringify(cfg, null, 2);
+    populateProcessingControls(cfg.processing);
 
     frameW = st.frame_w || frameW;
     frameH = st.frame_h || frameH;
 
+    syncViolationSound(Boolean(st.alert_active), Number(st.alert_remaining_sec) || 0);
+
     statusDiv.textContent =
-      `Источник: ${st.video_source}
-` +
       `Размер: ${st.frame_w}×${st.frame_h}
 ` +
-      `FPS(источник): ${Number(st.source_fps).toFixed(2)} | FPS(вывод): ${Number(st.output_fps).toFixed(2)} | FPS(логика): ${Number(st.process_fps).toFixed(2)} | FPS(детекция): ${Number(st.ped_detect_fps).toFixed(2)}
+      `FPS(источник): ${Number(st.source_fps).toFixed(2)} | FPS(вывод): ${Number(st.output_fps).toFixed(2)} | FPS(детекция): ${Number(st.ped_detect_fps).toFixed(2)}
 ` +
-      `PED_DETECT_STRIDE=${st.ped_detect_stride}, HOLD=${st.ped_hold_frames} frames, OUTPUT_MAX_FPS=${st.output_max_fps}, JPEG_QUALITY=${st.jpeg_quality}
-` +
-      `STREAM_MAX_WIDTH=${st.stream_max_width}, STREAM_MAX_HEIGHT=${st.stream_max_height}
+      `Пропуск кадров=${st.process_stride}, Сигнал=${st.alert_active ? `${Number(st.alert_remaining_sec).toFixed(1)}с` : "выкл"}
 ` +
       `Пауза: ${st.paused ? "да" : "нет"}
 ` +
@@ -338,7 +511,7 @@ ${st.last_alert_msg}
 window.addEventListener("resize", resizeCanvasToVideo);
 video.addEventListener("load", () => resizeCanvasToVideo());
 
-// Start
+// Запуск
 setMode("crosswalk");
 refreshAll();
 setInterval(() => { resizeCanvasToVideo(); refreshAll(); }, 1500);

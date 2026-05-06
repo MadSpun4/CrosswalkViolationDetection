@@ -4,17 +4,17 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import os
 import time
 
 from ..config import Settings
-from .config_store import get_store_from_env, CalibrationStore
+from .config_store import get_store_from_env, CalibrationStore, effective_processing
 from .framehub import FrameHub
 
 app = FastAPI(title="Pedestrian Monitoring UI")
 
-# Static
+# Статика
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -56,11 +56,17 @@ class RoiPayload(BaseModel):
     roi: Tuple[int, int, int, int] = Field(..., description="(x1,y1,x2,y2)")
 
 
-class ManualRedPayload(BaseModel):
-    enabled: bool = Field(True, description="Enable/disable manual red simulation")
-    x: int = Field(..., description="Center x in frame coords")
-    y: int = Field(..., description="Center y in frame coords")
-    radius: int = Field(14, description="Circle radius in pixels (frame coords)")
+class ProcessingPayload(BaseModel):
+    preprocessing_enabled: Optional[bool] = None
+    enable_homomorphic: Optional[bool] = None
+    enable_hist_eq: Optional[bool] = None
+    enable_gaussian_blur: Optional[bool] = None
+    gaussian_kernel: Optional[int] = None
+    yolo_conf: Optional[float] = None
+    process_stride: Optional[int] = None
+    display_preprocessed: Optional[bool] = None
+    traffic_light_inverted: Optional[bool] = None
+    processing_mode: Optional[str] = None
 
 
 @app.get("/api/status")
@@ -75,13 +81,17 @@ def get_config():
         "crosswalk": cal.crosswalk,
         "traffic_light_roi": cal.traffic_light_roi,
         "tl_brightness_threshold": settings.tl_brightness_threshold,
-        "manual_red": {
-            "enabled": cal.manual_red.enabled,
-            "x": cal.manual_red.x,
-            "y": cal.manual_red.y,
-            "radius": cal.manual_red.radius,
-        },
+        "tl_detection_mode": settings.tl_detection_mode,
+        "tl_color_fraction_threshold": settings.tl_color_fraction_threshold,
+        "tl_color_margin": settings.tl_color_margin,
+        "processing": effective_processing(cal, settings),
     }
+
+
+@app.post("/api/processing")
+def set_processing(payload: ProcessingPayload):
+    store.set_processing(payload.dict(exclude_none=True))
+    return JSONResponse({"ok": True, "processing": effective_processing(store.get(), settings)})
 
 
 @app.post("/api/crosswalk")
@@ -94,18 +104,6 @@ def set_crosswalk(payload: CrosswalkPayload):
 def set_roi(payload: RoiPayload):
     store.set_traffic_light_roi(payload.roi)
     return JSONResponse({"ok": True, "traffic_light_roi": store.get().traffic_light_roi})
-
-
-@app.post("/api/manual_red")
-def set_manual_red(payload: ManualRedPayload):
-    store.set_manual_red(payload.enabled, payload.x, payload.y, payload.radius)
-    return JSONResponse({"ok": True, "manual_red": get_config()["manual_red"]})
-
-
-@app.post("/api/manual_red/disable")
-def disable_manual_red():
-    store.disable_manual_red()
-    return JSONResponse({"ok": True, "manual_red": get_config()["manual_red"]})
 
 
 @app.post("/api/control/pause")

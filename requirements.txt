@@ -1,4 +1,4 @@
-# Core
+# Ядро
 numpy
 opencv-python-headless
 python-dotenv
@@ -7,5 +7,5 @@ python-dotenv
 fastapi
 uvicorn[standard]
 
-# PyTorch + YOLO (Ultralytics)
+# YOLO
 ultralytics

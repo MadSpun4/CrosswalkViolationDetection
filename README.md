@@ -1,13 +1,13 @@
-# Automated Pedestrian Violation Monitoring — Project Template (Docker Compose)
+# Automated Pedestrian Violation Monitoring – Project Template (Docker Compose)
 
 This repository is a **starter template** for the diploma project: an automated system that processes a video stream,
 detects a pedestrian, checks the pedestrian traffic light state, and issues a **real-time warning** (no data storage).
 
 The template includes:
 - A clean Python package layout (`src/`)
-- A configurable runtime via `.env`
+- A configurable runtime via `.env` and the web UI
 - A reproducible environment via **Dockerfile + docker-compose**
-- Placeholder pipeline steps aligned with the thesis structure (preprocessing + detection + alerting)
+- Pipeline steps aligned with the thesis structure: traffic-light ROI check, preprocessing, Viola-Jones ROI selection, YOLO person detection, and rule classification
 
 ## Prerequisites (host machine)
 - Docker + Docker Compose v2
@@ -36,10 +36,11 @@ docker compose down
 
 ## Configuration
 All runtime parameters are controlled via `.env`:
-- `VIDEO_SOURCE` — path in container or RTSP URL
-- `CROSSWALK_POLYGON` — polygon for crosswalk region (optional)
-- `TRAFFIC_LIGHT_ROI` — rectangular ROI for traffic light analysis (optional)
-- `ALERT_MODE` — `console` (default) or `beep` (stub)
+- `VIDEO_SOURCE` – path in container or RTSP URL
+- `CROSSWALK_POLYGON` – polygon for crosswalk region (optional)
+- `TRAFFIC_LIGHT_ROI` – rectangular ROI for traffic light analysis (optional)
+- `YOLO_PERSON_CLASS` – class id used for `person` detections (default `0` for COCO)
+- `VIOLA_*` – Viola-Jones candidate ROI parameters before YOLO
 
 ## YOLO (PyTorch)
 This template uses **Ultralytics** (PyTorch-based) as an optional pedestrian detector:
@@ -62,12 +63,11 @@ src/
   pipeline.py        # orchestration
   preprocessing/     # image enhancement
   detectors/         # pedestrian + traffic light
-  alerting/          # warnings (real-time)
 ```
 
 ## Notes
-- The implementation in this template is a **scaffold**. Core algorithms will be implemented incrementally.
-- The pipeline currently runs and prints basic diagnostics; detection modules are stubs unless configured.
+- Background subtraction and combined processing modes are visible in the UI as reserved controls; they are not bound to an algorithm yet.
+- If `YOLO_MODEL` is empty, the pedestrian detector returns no detections.
 
 
 ## Web UI
@@ -75,35 +75,53 @@ Run with Docker Compose and open in browser:
 - http://localhost:8000
 
 The UI allows selecting:
-- Crosswalk zone as 4 points (quadrilateral)
+- Crosswalk zone as a polygon
 - Pedestrian traffic light ROI as a rectangle
+- Preprocessing toggles and main analysis parameters
 
 Calibration is stored in `runtime/calibration.json`.
 
 
 ## UI additions (v2)
 - Crosswalk can be any polygon (>=3 points). Add points by clicking, then press 'Save polygon'.
-- Manual red simulation: click to place a red circle; pipeline sees it as part of the frame.
+- Traffic-light inversion can be used to treat green as the forbidden signal for demo videos.
 - Playback controls: pause/resume; restart for file sources.
 
 
 ## Performance tuning
-- PROCESS_STRIDE: process every N-th frame (e.g., 4 or 6) to reduce compute for real-time camera streams.
+- PROCESS_STRIDE: run preprocessing + Viola-Jones + YOLO only on every N-th source frame.
+  Example: `PROCESS_STRIDE=6` gives about 5 processed FPS from a 30 FPS input stream.
+- DISPLAY_PREPROCESSED: show the preprocessed selected frame in the single MJPEG stream.
 - OUTPUT_MAX_FPS: limit MJPEG streaming FPS if CPU-bound on JPEG.
 - JPEG_QUALITY: quality for MJPEG stream.
 
 If UI controls seem unresponsive after updates, do a hard refresh (Ctrl+F5) to bypass cached JS.
 
 ## Traffic light detection (ROI)
-The pedestrian light state is computed by mean grayscale brightness inside ROI and compared with `TL_BRIGHTNESS_T` (default 60). Set ROI in the UI.
+`TL_DETECTION_MODE=color` is the practical default. It searches for saturated red and green
+pixels inside the traffic-light ROI and treats the signal as `UNKNOWN` when neither color is
+dominant enough. This prevents a random bright ROI from immediately becoming "red".
+
+For the thesis brightness mode, set `TL_DETECTION_MODE=brightness`; then the pedestrian light
+state follows the documented formula:
+
+```text
+Y(x,y) = 0.299R(x,y) + 0.587G(x,y) + 0.114B(x,y)
+Y* = mean(Y over ROI)
+red if Y* >= TL_BRIGHTNESS_T
+```
+
+Green demo inversion is controlled by the UI button "Инвертировать цвет светофора" or
+`TRAFFIC_LIGHT_INVERTED=1`; in that mode crossing on green is classified as a violation.
+Set ROI in the UI.
 
 ## MJPEG stream performance
 If UI FPS is much lower than source FPS, set `STREAM_MAX_WIDTH` (e.g., 480) to downscale frames before JPEG encoding.
 
-## FPS semantics (v5)
-- output_fps: how fast the browser receives MJPEG frames.
-- process_fps: per-frame logic rate (traffic light + rule evaluation). In v5 it should be close to output_fps.
-- ped_detect_fps: how often the heavy pedestrian detector runs; controlled by PED_DETECT_STRIDE.
+## FPS semantics (v7)
+- output_fps: how fast the browser receives processed MJPEG frames.
+- process_fps: how many selected source frames reach preprocessing + rule evaluation.
+- ped_detect_fps: how often YOLO actually runs; by default it matches the selected-frame analysis rate.
 
 ## Crosswalk membership
 A pedestrian is considered inside the crosswalk if the *bottom edge* of their bbox lies inside the polygon (approximated by bottom-left/center/right points).

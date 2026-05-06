@@ -3,16 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Пешеходный мониторинг — интерфейс</title>
-  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <title>Мониторинг пешеходных нарушений</title>
+  <link rel="stylesheet" href="/static/styles.css?v=8" />
 </head>
 <body>
   <div class="layout">
     <header class="header">
       <div class="title">Автоматизированная система мониторинга пешеходных нарушений</div>
-      <div class="subtitle">
-        Реальное время: видео-стрим + разметка областей интереса + симуляция красного сигнала
-      </div>
     </header>
 
     <main class="main">
@@ -21,9 +18,6 @@
           <img id="video" src="/stream.mjpg" alt="video stream" />
           <canvas id="overlay"></canvas>
         </div>
-        <div class="hint">
-          Поток обрабатывается постоянно. После сохранения разметки параметры применяются сразу к последующим кадрам.
-        </div>
       </section>
 
       <aside class="panel">
@@ -31,8 +25,7 @@
           <div class="panel-title">Статус</div>
           <div id="status" class="status">Загрузка…</div>
           <div class="note">
-            Если кнопки/режимы «не работают», открой DevTools → Console и проверь сообщения.
-            Также сделай hard refresh (Ctrl+F5), чтобы исключить кэш старого JS.
+            Для обновления Ctrl+F5 (hard refresh), чтобы исключить кэш старого JS.
           </div>
         </div>
 
@@ -41,43 +34,27 @@
           <div class="btn-row">
             <button id="pause" class="btn secondary" type="button">Пауза</button>
             <button id="resume" class="btn secondary" type="button">Продолжить</button>
-            <button id="restart" class="btn secondary" type="button">С начала (для файла)</button>
-          </div>
-          <div class="note">
-            Для файла воспроизведение идёт в реальном времени и зацикливается. Для RTSP/камеры «С начала» не применяется.
+            <button id="restart" class="btn secondary" type="button">С начала (видеозапись)</button>
+            <button id="audio-enable" class="btn secondary" type="button">Включить звук</button>
           </div>
         </div>
 
         <div class="panel-block">
           <div class="panel-title">Режим разметки</div>
+          <div class="note">Кликайте по кадру, чтобы добавить точки зоны перехода. Минимум – 3 точки.</div>
           <div class="btn-row">
             <button id="mode-crosswalk" class="btn" type="button">Зона перехода (полигон)</button>
-            <button id="mode-roi" class="btn" type="button">ROI светофора</button>
-            <button id="mode-manualred" class="btn" type="button">Симуляция красного</button>
           </div>
 
           <div id="crosswalk-tools" class="toolbox">
             <div class="btn-row">
               <button id="crosswalk-save" class="btn secondary" type="button">Сохранить полигон</button>
-              <button id="crosswalk-undo" class="btn secondary" type="button">Шаг назад</button>
-              <button id="crosswalk-clear" class="btn secondary" type="button">Очистить черновик</button>
             </div>
-            <div class="note">Кликайте по кадру, чтобы добавить точки. Минимум — 3 точки.</div>
           </div>
 
-          <div id="manualred-tools" class="toolbox">
-            <div class="row">
-              <label for="manualred-radius">Радиус круга:</label>
-              <input id="manualred-radius" type="range" min="6" max="80" value="14" />
-              <span id="manualred-radius-val" class="pill">14</span>
-            </div>
-            <div class="btn-row">
-              <button id="manualred-disable" class="btn secondary" type="button">Выключить симуляцию</button>
-            </div>
-            <div class="note">
-              В режиме симуляции клик по кадру ставит красный круг и включает симуляцию.
-              Чтобы «сработало как красный светофор», размести круг внутри ROI светофора.
-            </div>
+          <div class="note">Зажать ЛКМ по кадру и выделить зону со светофором для ROI светофора.</div>
+          <div class="btn-row">
+            <button id="mode-roi" class="btn" type="button">ROI светофора</button>
           </div>
 
           <div class="btn-row">
@@ -86,22 +63,60 @@
         </div>
 
         <div class="panel-block">
-          <div class="panel-title">Текущие параметры</div>
-          <pre id="config" class="config"></pre>
+          <div class="panel-title">Настройки анализа</div>
+          <div class="btn-row">
+            <button id="proc-mode-neural" class="btn active" type="button">Нейросетевой</button>
+            <button id="proc-mode-bg" class="btn secondary" type="button" disabled>Вычитание фона</button>
+            <button id="proc-mode-combined" class="btn secondary" type="button" disabled>Совмещение</button>
+          </div>
+          <div class="btn-row">
+            <button id="display-preprocessed-toggle" class="btn secondary" type="button">Предобработанный вид</button>
+            <button id="traffic-light-invert" class="btn secondary" type="button">Инвертировать цвет светофора</button>
+          </div>
+
+          <label class="check-row">
+            <input id="preprocessing-enabled" type="checkbox" />
+            <span>Предобработка</span>
+          </label>
+          <label class="check-row">
+            <input id="enable-homomorphic" type="checkbox" />
+            <span>Гомоморфная фильтрация</span>
+          </label>
+          <label class="check-row">
+            <input id="enable-hist-eq" type="checkbox" />
+            <span>Гистограммное выравнивание</span>
+          </label>
+          <label class="check-row">
+            <input id="enable-gaussian-blur" type="checkbox" />
+            <span>Гауссово размытие</span>
+          </label>
+
+          <div class="row">
+            <label for="gaussian-kernel">Ядро Гаусса</label>
+            <input id="gaussian-kernel" class="num" type="number" min="1" max="31" step="2" />
+          </div>
+          <div class="row">
+            <label for="yolo-conf">Порог YOLO</label>
+            <input id="yolo-conf" class="num" type="number" min="0" max="1" step="0.01" />
+          </div>
+          <div class="row">
+            <label for="process-stride">Пропуск кадров</label>
+            <input id="process-stride" class="num" type="number" min="1" max="120" step="1" />
+          </div>
+
+          <div class="btn-row">
+            <button id="processing-save" class="btn secondary" type="button">Сохранить настройки</button>
+          </div>
         </div>
 
         <div class="panel-block">
-          <div class="panel-title">Что делать после настройки</div>
-          <ul class="tips">
-            <li>Ничего дополнительно «запускать» не нужно: поток уже воспроизводится и обрабатывается.</li>
-            <li>После сохранения полигона/ROI на видео появятся красные контуры (рисуются на backend поверх кадра).</li>
-            <li>Для проверки «красного» — включи симуляцию и поставь круг внутри ROI светофора.</li>
-          </ul>
+          <div class="panel-title">Текущие параметры</div>
+          <pre id="config" class="config"></pre>
         </div>
       </aside>
     </main>
   </div>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=11"></script>
 </body>
 </html>

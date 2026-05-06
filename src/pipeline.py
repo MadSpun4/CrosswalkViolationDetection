@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, List, Tuple
 
 import numpy as np
 import cv2
@@ -10,7 +10,7 @@ from .config import Settings
 from .preprocessing.preprocess import Preprocessor
 from .detectors.pedestrian import PedestrianDetector, PedestrianDetection
 from .detectors.traffic_light import TrafficLightDetector, TrafficLightState
-from .alerting.factory import build_alerter
+from .detectors.viola_jones import ViolaJonesDetector
 
 
 Point = Tuple[int, int]
@@ -20,9 +20,13 @@ Point = Tuple[int, int]
 class FrameResult:
     alert: bool
     message: str
-    pedestrian: Optional[PedestrianDetection] = None
+    pedestrians: List[PedestrianDetection] = field(default_factory=list)
     traffic_light: Optional[TrafficLightState] = None
     pedestrian_in_crosswalk: Optional[bool] = None
+    pedestrian_crosswalk_states: List[bool] = field(default_factory=list)
+    viola_regions: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    display_frame_bgr: Optional[np.ndarray] = None
+    pedestrian_detection_ran: bool = False
 
 
 def _point_in_polygon(pt: Point, polygon: List[Point]) -> bool:
@@ -31,15 +35,9 @@ def _point_in_polygon(pt: Point, polygon: List[Point]) -> bool:
 
 
 def _bottom_edge_in_polygon(bbox_xyxy: Tuple[int, int, int, int], polygon: List[Point]) -> bool:
-    """Returns True when the *bottom edge* of bbox is inside polygon.
-
-    User requirement: treat a pedestrian as being in the crosswalk when the lower boundary of the bbox
-    lies inside the n-gon. In practice we approximate the edge by three points:
-      - bottom-left, bottom-center, bottom-right
-    and require >= 2 points to be inside.
-    """
+    """Проверяет нижний край рамки по трём точкам"""
     x1, y1, x2, y2 = bbox_xyxy
-    # Use y2 (bottom) but keep it within reasonable range
+    # Берём низ рамки
     y = int(y2)
     pts = [
         (int(x1), y),
@@ -54,75 +52,108 @@ class Pipeline:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.preprocessor = Preprocessor(settings)
+        self.viola_detector = ViolaJonesDetector(settings)
         self.ped_detector = PedestrianDetector(settings)
         self.tl_detector = TrafficLightDetector(settings)
-        self.alerter = build_alerter(settings)
-
-        # Internal state for detector throttling
-        self._frame_i = 0
-        self._last_ped: Optional[PedestrianDetection] = None
-        self._last_ped_age = 10**9  # frames since last detection (large on init)
 
     def process_frame(
         self,
         frame_bgr: np.ndarray,
         traffic_light_roi: Optional[Tuple[int, int, int, int]] = None,
         crosswalk_polygon: Optional[List[Point]] = None,
+        runtime_processing: Optional[Dict[str, Any]] = None,
     ) -> FrameResult:
-        self._frame_i += 1
+        runtime_processing = runtime_processing or {}
+        polygon = crosswalk_polygon if crosswalk_polygon is not None else self.settings.crosswalk_polygon
+        preprocessing_enabled = bool(runtime_processing.get("preprocessing_enabled", True))
+        display_preprocessed = bool(runtime_processing.get("display_preprocessed", self.settings.display_preprocessed))
+        traffic_light_inverted = bool(runtime_processing.get("traffic_light_inverted", self.settings.traffic_light_inverted))
+        yolo_conf = float(runtime_processing.get("yolo_conf", self.settings.yolo_conf))
 
-        # 1) Preprocess (can be disabled via env flags)
-        frame_pp = self.preprocessor.apply(frame_bgr)
+        # Светофор по ROI
+        tl = self.tl_detector.detect(
+            frame_bgr,
+            roi_override=traffic_light_roi,
+            invert_violation=traffic_light_inverted,
+        )
 
-        # 2) Traffic light state (always cheap; evaluated per-frame)
-        tl = self.tl_detector.detect(frame_pp, roi_override=traffic_light_roi)
+        should_preprocess = preprocessing_enabled and (
+            display_preprocessed or (tl is not None and tl.is_violation_signal)
+        )
+        frame_pp = frame_bgr
+        if should_preprocess:
+            frame_pp = self.preprocessor.apply(
+                frame_bgr,
+                enable_homomorphic=runtime_processing.get("enable_homomorphic"),
+                enable_hist_eq=runtime_processing.get("enable_hist_eq"),
+                enable_gaussian_blur=runtime_processing.get("enable_gaussian_blur"),
+                gaussian_kernel=runtime_processing.get("gaussian_kernel"),
+            )
 
-        # 3) Pedestrian detection throttling:
-        #    - does NOT throttle per-frame logic or UI
-        #    - runs the heavy detector once per `ped_detect_stride` frames
-        stride = max(1, int(self.settings.ped_detect_stride))
-        do_detect = ((self._frame_i % stride) == 0)
+        display_frame = frame_pp if (display_preprocessed and preprocessing_enabled) else frame_bgr
 
-        ped = self._last_ped
-        if do_detect:
-            ped = self.ped_detector.detect(frame_pp)
-            self._last_ped = ped
-            self._last_ped_age = 0
-        else:
-            self._last_ped_age += 1
-            # Drop stale bbox if too old (to avoid "ghost" pedestrian forever)
-            if self.settings.ped_hold_frames >= 0 and self._last_ped_age > self.settings.ped_hold_frames:
-                ped = None
-                self._last_ped = None
+        if tl is None or not tl.is_violation_signal:
+            return FrameResult(
+                alert=False,
+                message="",
+                traffic_light=tl,
+                display_frame_bgr=display_frame,
+            )
 
-        # 4) Pedestrian-in-crosswalk
+        # Кандидаты для YOLO
+        viola_regions = [r.bbox_xyxy for r in self.viola_detector.detect_regions(frame_pp)]
+        if not viola_regions:
+            return FrameResult(
+                alert=False,
+                message="",
+                traffic_light=tl,
+                viola_regions=[],
+                display_frame_bgr=display_frame,
+            )
+
+        # YOLO на выбранном кадре
+        pedestrians = self.ped_detector.detect_all(
+            frame_pp,
+            candidate_rois=viola_regions,
+            conf_threshold=yolo_conf,
+        )
+        detection_ran = True
+
+        # Положение пешеходов относительно перехода
+        crosswalk_states: List[bool] = []
+        if polygon and len(polygon) >= 3:
+            crosswalk_states = [
+                _bottom_edge_in_polygon(ped.bbox_xyxy, polygon)
+                for ped in pedestrians
+                if ped.confidence >= yolo_conf
+            ]
+
         ped_in_crosswalk: Optional[bool] = None
-        if ped is not None and crosswalk_polygon and len(crosswalk_polygon) >= 3:
-            ped_in_crosswalk = _bottom_edge_in_polygon(ped.bbox_xyxy, crosswalk_polygon)
+        if polygon and len(polygon) >= 3:
+            ped_in_crosswalk = any(crosswalk_states) if crosswalk_states else False
 
-        # 5) Violation classification (per thesis):
-        #    Violation = pedestrian in crosswalk AND pedestrian light is RED.
-        #    Safe = no pedestrian OR green (or no configured ROI/crosswalk).
-        #    If we cannot determine crosswalk membership (polygon not set), we do NOT raise violation.
-        #    This keeps behaviour aligned with the "position relative to boundaries" property.
-        if (
-            ped is not None
-            and ped.confidence >= self.settings.yolo_conf
-            and (ped_in_crosswalk is True)
-            and (tl is not None and tl.is_red)
-        ):
+        # Нарушение: пешеход в зоне при запрещающем сигнале
+        if pedestrians and polygon and len(polygon) >= 3 and any(crosswalk_states):
             return FrameResult(
                 alert=True,
-                message="VIOLATION: pedestrian in crosswalk while pedestrian light is RED",
-                pedestrian=ped,
+                message="VIOLATION ACTIVE",
+                pedestrians=pedestrians,
                 traffic_light=tl,
                 pedestrian_in_crosswalk=ped_in_crosswalk,
+                pedestrian_crosswalk_states=crosswalk_states,
+                viola_regions=viola_regions,
+                display_frame_bgr=display_frame,
+                pedestrian_detection_ran=detection_ran,
             )
 
         return FrameResult(
             alert=False,
             message="",
-            pedestrian=ped,
+            pedestrians=pedestrians,
             traffic_light=tl,
             pedestrian_in_crosswalk=ped_in_crosswalk,
+            pedestrian_crosswalk_states=crosswalk_states,
+            viola_regions=viola_regions,
+            display_frame_bgr=display_frame,
+            pedestrian_detection_ran=detection_ran,
         )

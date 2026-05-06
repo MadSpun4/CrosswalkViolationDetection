@@ -10,7 +10,7 @@ import numpy as np
 
 from ..config import Settings
 from ..pipeline import Pipeline
-from .config_store import CalibrationStore
+from .config_store import CalibrationStore, effective_processing
 
 
 def _is_rtsp(src: str) -> bool:
@@ -35,20 +35,14 @@ def _env_float(name: str, default: float) -> float:
 
 
 class FrameHub:
-    """Background worker.
-
-    Key change in v5:
-    - We always run per-frame logic (traffic light + rule evaluation) to keep UI responsive.
-    - Heavy pedestrian detection is throttled *inside Pipeline* (PED_DETECT_STRIDE),
-      so `process_fps` stays close to `output_fps` even when detection is sparse.
-    """
+    """Фоновая обработка кадров и MJPEG-поток"""
 
     def __init__(self, settings: Settings, store: CalibrationStore) -> None:
         self.settings = settings
         self.store = store
         self.pipeline = Pipeline(settings)
 
-        # Stream performance knobs
+        # Параметры потока
         self.output_max_fps = _env_float("OUTPUT_MAX_FPS", 0.0)
         self.jpeg_quality = max(30, min(95, _env_int("JPEG_QUALITY", 80)))
         self.stream_max_width = max(0, _env_int("STREAM_MAX_WIDTH", 0))
@@ -62,18 +56,19 @@ class FrameHub:
         self._restart = Event()
         self._thread: Optional[Thread] = None
 
-        # Status
+        # Статус
         self._frame_w = 0
         self._frame_h = 0
         self._fps_src = 0.0
         self._fps_out = 0.0
-        self._fps_proc = 0.0           # per-frame logic fps (pipeline called each frame)
-        self._fps_ped_det = 0.0        # how often heavy pedestrian detector was invoked
+        self._fps_proc = 0.0           # FPS анализа
+        self._fps_ped_det = 0.0        # FPS YOLO
         self._paused_flag = False
         self._last_err: Optional[str] = None
 
         self._last_alert_ts: Optional[float] = None
         self._last_alert_msg: str = ""
+        self._alert_active_until = 0.0
 
     def start(self) -> None:
         if self._thread is not None:
@@ -104,7 +99,11 @@ class FrameHub:
             return self._latest_jpeg
 
     def get_status(self) -> Dict[str, Any]:
+        cal = self.store.get()
+        proc = effective_processing(cal, self.settings)
         with self._lock:
+            now = time.time()
+            alert_remaining = max(0.0, self._alert_active_until - now)
             return {
                 "frame_w": self._frame_w,
                 "frame_h": self._frame_h,
@@ -112,8 +111,8 @@ class FrameHub:
                 "output_fps": self._fps_out,
                 "process_fps": self._fps_proc,
                 "ped_detect_fps": self._fps_ped_det,
-                "ped_detect_stride": self.settings.ped_detect_stride,
-                "ped_hold_frames": self.settings.ped_hold_frames,
+                "process_stride": proc["process_stride"],
+                "processing": proc,
                 "output_max_fps": self.output_max_fps,
                 "jpeg_quality": self.jpeg_quality,
                 "stream_max_width": self.stream_max_width,
@@ -123,6 +122,8 @@ class FrameHub:
                 "video_source": self.settings.video_source,
                 "last_alert_ts": self._last_alert_ts,
                 "last_alert_msg": self._last_alert_msg,
+                "alert_active": alert_remaining > 0.0,
+                "alert_remaining_sec": alert_remaining,
             }
 
     def _open_capture(self) -> Optional[cv2.VideoCapture]:
@@ -146,10 +147,10 @@ class FrameHub:
         self._fps_src = float(fps)
         frame_dt = 1.0 / float(fps)
 
-        next_ts = time.time()      # pacing for file sources
-        out_next_ts = time.time()  # output limiter
+        next_ts = time.time()      # темп файла
+        out_next_ts = time.time()  # лимит вывода
 
-        # FPS estimation windows
+        # Окна расчёта FPS
         t0_out = time.time()
         t0_proc = time.time()
         t0_det = time.time()
@@ -158,6 +159,7 @@ class FrameHub:
         c_det = 0
 
         last_result = None
+        source_frame_i = 0
 
         while not self._stop.is_set():
             if self._paused.is_set():
@@ -168,11 +170,13 @@ class FrameHub:
                 self._restart.clear()
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 last_result = None
+                source_frame_i = 0
 
             ok, frame = cap.read()
             if not ok:
                 if src_is_file:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    source_frame_i = 0
                     continue
                 cap.release()
                 time.sleep(0.5)
@@ -182,12 +186,14 @@ class FrameHub:
                     continue
                 continue
 
+            source_frame_i += 1
+
             h, w = frame.shape[:2]
             with self._lock:
                 self._frame_w = int(w)
                 self._frame_h = int(h)
 
-            # File pacing only (RTSP/camera are real-time by nature)
+            # Темп для файла
             if src_is_file:
                 now = time.time()
                 if now < next_ts:
@@ -195,41 +201,34 @@ class FrameHub:
                 next_ts = max(next_ts + frame_dt, time.time())
 
             cal = self.store.get()
+            proc = effective_processing(cal, self.settings)
+            process_stride = max(1, int(proc.get("process_stride", 1)))
+            if ((source_frame_i - 1) % process_stride) != 0:
+                continue
 
-            # Manual red simulation before processing
-            frame_for_pipeline = frame
-            if cal.manual_red.enabled:
-                frame_for_pipeline = frame.copy()
-                cv2.circle(
-                    frame_for_pipeline,
-                    (int(cal.manual_red.x), int(cal.manual_red.y)),
-                    int(cal.manual_red.radius),
-                    (0, 0, 255),
-                    thickness=-1,
-                )
-
-            # Run per-frame logic (pipeline decides internally whether to invoke heavy detector)
+            # Анализ выбранного кадра
             try:
-                before_i = self.pipeline._frame_i  # internal; ok for scaffold status
                 last_result = self.pipeline.process_frame(
-                    frame_for_pipeline,
+                    frame,
                     traffic_light_roi=cal.traffic_light_roi,
                     crosswalk_polygon=cal.crosswalk,
+                    runtime_processing=proc,
                 )
-                after_i = self.pipeline._frame_i
-
-                # Detect calls are made when pipeline internal counter hits stride.
-                # We approximate ped-det count by checking age reset (implementation detail).
-                # For UI, this is sufficient. (c_det is used for fps.)
-                # We increment when pipeline's internal frame index % stride == 0.
-                if (after_i % max(1, self.settings.ped_detect_stride)) == 0:
+                if last_result is not None and getattr(last_result, "pedestrian_detection_ran", False):
                     c_det += 1
 
+                now_alert = time.time()
                 if last_result is not None and getattr(last_result, "alert", False):
-                    self.pipeline.alerter.notify(last_result.message)
                     with self._lock:
-                        self._last_alert_ts = time.time()
+                        was_active = self._alert_active_until > now_alert
+                        self._alert_active_until = now_alert + 3.0
                         self._last_alert_msg = last_result.message
+                        if not was_active:
+                            self._last_alert_ts = now_alert
+                else:
+                    with self._lock:
+                        if self._alert_active_until <= now_alert:
+                            self._last_alert_msg = ""
             except Exception as e:
                 self._last_err = f"pipeline error: {e!r}"
 
@@ -246,15 +245,20 @@ class FrameHub:
                 t0_det = time.time()
                 c_det = 0
 
-            # Output limiter
+            # Лимит вывода
             if self.output_max_fps and self.output_max_fps > 0:
                 now = time.time()
                 if now < out_next_ts:
                     continue
                 out_next_ts = now + (1.0 / self.output_max_fps)
 
-            # Draw overlays and encode
-            frame_vis = self._draw_overlays(frame_for_pipeline, cal, last_result)
+            # Разметка и JPEG
+            display_frame = getattr(last_result, "display_frame_bgr", None) if last_result is not None else None
+            if display_frame is None:
+                display_frame = frame
+            with self._lock:
+                alert_active = self._alert_active_until > time.time()
+            frame_vis = self._draw_overlays(display_frame, cal, last_result, alert_active)
             frame_vis = self._resize_for_stream(frame_vis)
 
             ok2, buf = cv2.imencode(
@@ -292,93 +296,97 @@ class FrameHub:
         nh = max(1, int(h * scale))
         return cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
 
-    def _draw_overlays(self, frame: np.ndarray, cal, result) -> np.ndarray:
+    def _draw_overlays(
+        self,
+        frame: np.ndarray,
+        cal,
+        result,
+        alert_active: bool = False,
+    ) -> np.ndarray:
         vis = frame.copy()
 
-        # Crosswalk polygon
+        # Полигон перехода
         if cal.crosswalk and len(cal.crosswalk) >= 3:
             pts = np.array(cal.crosswalk, dtype=np.int32).reshape((-1, 1, 2))
             cv2.polylines(vis, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
             for (x, y) in cal.crosswalk:
                 cv2.circle(vis, (x, y), 4, (0, 0, 255), -1)
 
-        # Traffic light ROI
+        # ROI светофора
         if cal.traffic_light_roi:
             x1, y1, x2, y2 = cal.traffic_light_roi
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-        # Manual red indicator
-        if cal.manual_red.enabled:
-            cv2.circle(
-                vis,
-                (int(cal.manual_red.x), int(cal.manual_red.y)),
-                int(cal.manual_red.radius),
-                (0, 0, 255),
-                2,
-            )
-            cv2.putText(
-                vis,
-                "MANUAL RED (sim)",
-                (12, 54),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
+        # ROI-кандидаты Viola-Jones
+        if result is not None:
+            for x1, y1, x2, y2 in getattr(result, "viola_regions", []) or []:
+                cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 180, 0), 1)
 
-        # Pedestrian bbox
-        if result is not None and getattr(result, "pedestrian", None) is not None:
-            x1, y1, x2, y2 = result.pedestrian.bbox_xyxy
-            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(
-                vis,
-                f"person {result.pedestrian.confidence:.2f}",
-                (x1, max(0, y1 - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
-
-            if getattr(result, "pedestrian_in_crosswalk", None) is not None:
-                tag = "IN CROSSWALK" if result.pedestrian_in_crosswalk else "OUTSIDE"
+        # Рамки пешеходов
+        if result is not None:
+            pedestrians = getattr(result, "pedestrians", []) or []
+            states = getattr(result, "pedestrian_crosswalk_states", []) or []
+            for idx, ped in enumerate(pedestrians):
+                x1, y1, x2, y2 = ped.bbox_xyxy
+                in_crosswalk = states[idx] if idx < len(states) else None
+                box_color = (0, 0, 255) if in_crosswalk else (0, 255, 255)
+                cv2.rectangle(vis, (x1, y1), (x2, y2), box_color, 2)
                 cv2.putText(
                     vis,
-                    tag,
-                    (x1, min(vis.shape[0] - 8, y2 + 18)),
+                    f"person {ped.confidence:.2f}",
+                    (x1, max(0, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (0, 0, 255) if result.pedestrian_in_crosswalk else (0, 255, 255),
+                    box_color,
                     2,
                     cv2.LINE_AA,
                 )
+                if in_crosswalk is not None:
+                    tag = "IN CROSSWALK" if in_crosswalk else "OUTSIDE"
+                    cv2.putText(
+                        vis,
+                        tag,
+                        (x1, min(vis.shape[0] - 8, y2 + 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        box_color,
+                        2,
+                        cv2.LINE_AA,
+                    )
 
-        # Traffic light state
+        # Состояние светофора
         if result is not None and getattr(result, "traffic_light", None) is not None:
             tl = result.traffic_light
-            txt = (
-                f"ped light: {'RED' if tl.is_red else 'GREEN'} "
-                f"(Y={tl.red_score:.1f}, red={tl.red_fraction*100:.1f}%)"
-            )
+            signal = (getattr(tl, "signal_color", "unknown") or "unknown").upper()
+            forbidden = (getattr(tl, "violation_color", "red") or "red").upper()
+            mode = getattr(tl, "detection_mode", "brightness")
+            if mode == "color":
+                txt = f"light:{signal} forbid:{forbidden} R={tl.red_score:.3f} G={tl.green_score:.3f}"
+            else:
+                txt = f"light:{signal} forbid:{forbidden} Y={tl.red_score:.1f}"
+            if signal == "UNKNOWN":
+                color = (0, 255, 255)
+            elif getattr(tl, "is_violation_signal", False):
+                color = (0, 0, 255)
+            else:
+                color = (0, 255, 0)
             cv2.putText(
                 vis,
                 txt,
                 (12, 28),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
-                (0, 0, 255) if tl.is_red else (0, 255, 0),
+                color,
                 2,
                 cv2.LINE_AA,
             )
 
-        # Violation banner
-        if result is not None and getattr(result, "alert", False):
+        # Баннер нарушения
+        if alert_active:
             cv2.rectangle(vis, (0, 0), (vis.shape[1], 90), (0, 0, 255), thickness=-1)
             cv2.putText(
                 vis,
-                "VIOLATION DETECTED",
+                "VIOLATION ACTIVE",
                 (12, 62),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.2,
