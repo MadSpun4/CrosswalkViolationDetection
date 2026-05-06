@@ -1,127 +1,199 @@
-# Automated Pedestrian Violation Monitoring – Project Template (Docker Compose)
+# Автоматизированная система мониторинга пешеходных нарушений
 
-This repository is a **starter template** for the diploma project: an automated system that processes a video stream,
-detects a pedestrian, checks the pedestrian traffic light state, and issues a **real-time warning** (no data storage).
+Прототип системы для анализа видеопотока с пешеходного перехода. Система определяет сигнал пешеходного светофора, ищет пешеходов в зоне перехода и показывает предупреждение, если человек находится на переходе при запрещающем сигнале.
 
-The template includes:
-- A clean Python package layout (`src/`)
-- A configurable runtime via `.env` and the web UI
-- A reproducible environment via **Dockerfile + docker-compose**
-- Pipeline steps aligned with the thesis structure: traffic-light ROI check, preprocessing, Viola-Jones ROI selection, YOLO person detection, and rule classification
+При активном нарушении в видеопотоке появляется красная плашка `VIOLATION ACTIVE`, а в браузере проигрывается звуковой сигнал до окончания таймера нарушения. Проект не ведет архив нарушений и не сохраняет видеокадры: на диск записываются только настройки калибровки интерфейса.
 
-## Prerequisites (host machine)
-- Docker + Docker Compose v2
-- Git
+## Что реализовано
 
-## Quick start
-1. Copy environment file:
+- веб-интерфейс на FastAPI с MJPEG-потоком;
+- калибровка зоны пешеходного перехода полигоном;
+- калибровка ROI пешеходного светофора прямоугольником;
+- определение красного и зеленого сигналов по цвету HSV или по яркости ROI;
+- инверсия запрещающего сигнала для видео, где нарушением нужно считать движение на зеленый;
+- предобработка кадра: гомоморфная фильтрация, гистограммное выравнивание, гауссово размытие;
+- поиск ROI-кандидатов через Viola–Jones и детекция пешеходов через YOLO;
+- визуальная разметка полигона, ROI, кандидатов Viola–Jones и рамок пешеходов;
+- звуковое предупреждение в браузере при активном нарушении.
+
+Рабочий режим основной обработки сейчас нейросетевой: `Viola–Jones -> YOLO -> проверка положения пешехода относительно полигона`.
+
+## Как работает алгоритм
+
+1. Приложение читает видеофайл.
+2. По ROI светофора определяется текущий сигнал.
+3. Если сигнал не является запрещающим, тяжелая детекция пешеходов не запускается.
+4. При запрещающем сигнале кадр проходит выбранную предобработку.
+5. Viola–Jones находит области-кандидаты, где может находиться человек.
+6. YOLO проверяет эти области и возвращает рамки класса `person`.
+7. Для каждой рамки проверяется нижняя грань: левая, центральная и правая нижние точки сравниваются с полигоном перехода.
+8. Нарушение фиксируется, если пешеход находится внутри полигона при запрещающем сигнале.
+
+Такой порядок соответствует проектной модели из ВКР: система экономит ресурсы, включая детекцию пешеходов только при запрещающем сигнале, и позволяет администратору калибровать переход и ROI светофора через интерфейс.
+
+## Требования
+
+- Docker;
+- Docker Compose v2;
+- Git;
+- современный браузер.
+
+Python и системные зависимости OpenCV устанавливаются внутри Docker-образа.
+
+## Быстрый запуск
+
+1. Создайте локальный `.env`:
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+   Для Git Bash или Linux/macOS:
+
    ```bash
    cp .env.example .env
    ```
 
-2. Put a test video into `input_data/` (the folder is gitignored):
-   - Example: `input_data/test.mp4`
-   - Or set `VIDEO_SOURCE` to an RTSP URL in `.env`
+2. Положите видео в `input_data/` или укажите другой источник в `.env`.
 
-3. Build and run:
+   По умолчанию используется:
+
+   ```env
+   VIDEO_SOURCE=/app/input_data/test.mp4
+   ```
+
+3. Соберите и запустите контейнер:
+
    ```bash
    docker compose build
    docker compose up
    ```
 
-Stop:
-```bash
-docker compose down
+4. Откройте интерфейс:
+
+   ```text
+   http://localhost:8000
+   ```
+
+5. Остановите приложение по завершении использования:
+
+   ```bash
+   docker compose down
+   ```
+
+## Настройка в интерфейсе
+
+1. Нажмите `Включить звук`, чтобы браузер разрешил аудиосигнал.
+2. В режиме `Зона перехода (полигон)` кликами задайте границы перехода и нажмите `Сохранить полигон`.
+3. В режиме `ROI светофора` выделите прямоугольник вокруг сигнала пешеходного светофора.
+4. При необходимости включите `Инвертировать цвет светофора`, если запрещающим сигналом в вашем материале нужно считать зеленый.
+5. Настройте предобработку, порог YOLO и пропуск кадров, затем нажмите `Сохранить настройки`.
+
+Калибровка сохраняется в `runtime/calibration.json`. Эта папка не попадает в Git, потому что содержит локальное состояние запуска.
+
+## Основные параметры `.env`
+
+| Параметр | Назначение |
+| --- | --- |
+| `VIDEO_SOURCE` | путь к видео внутри контейнера или RTSP-URL |
+| `TRAFFIC_LIGHT_ROI` | ROI светофора в формате `x1,y1,x2,y2`; можно задать через UI |
+| `CROSSWALK_POLYGON` | полигон перехода в формате `x1,y1;x2,y2;...`; можно задать через UI |
+| `RUNTIME_CONFIG` | путь к JSON-файлу с настройками интерфейса |
+| `YOLO_MODEL` | модель YOLO, например `yolov8n.pt` или `/app/models/yolov8n.pt` |
+| `YOLO_CONF` | минимальная уверенность детекции пешехода |
+| `YOLO_PERSON_CLASS` | класс `person` в датасете COCO, по умолчанию `0` |
+| `VIOLA_CASCADE_PATH` | путь к каскаду Viola–Jones; пустое значение использует каскад OpenCV по умолчанию |
+| `VIOLA_SCALE_FACTOR` | масштабирование окна каскада |
+| `VIOLA_MIN_NEIGHBORS` | минимальное число соседей для подтверждения кандидата |
+| `VIOLA_MIN_WIDTH`, `VIOLA_MIN_HEIGHT` | минимальный размер кандидата |
+| `VIOLA_PADDING` | расширение ROI-кандидата перед передачей в YOLO |
+| `ENABLE_HOMOMORPHIC` | включает гомоморфную фильтрацию |
+| `ENABLE_HIST_EQ` | включает гистограммное выравнивание |
+| `ENABLE_GAUSSIAN_BLUR` | включает гауссово размытие |
+| `GAUSSIAN_KERNEL` | размер ядра Гаусса, нечетное число |
+| `PROCESS_STRIDE` | анализ каждого N-го кадра |
+| `DISPLAY_PREPROCESSED` | показывает предобработанный кадр в видеопотоке |
+| `OUTPUT_MAX_FPS` | лимит FPS MJPEG-потока, `0` – без лимита |
+| `JPEG_QUALITY` | качество JPEG для MJPEG-потока, диапазон `30..95` |
+| `STREAM_MAX_WIDTH`, `STREAM_MAX_HEIGHT` | уменьшение кадра перед отправкой в браузер, `0` – без изменения |
+
+После изменения `.env` перезапустите контейнер.
+
+## Определение сигнала светофора
+
+Практический режим по умолчанию:
+
+```env
+TL_DETECTION_MODE=color
 ```
 
-## Configuration
-All runtime parameters are controlled via `.env`:
-- `VIDEO_SOURCE` – path in container or RTSP URL
-- `CROSSWALK_POLYGON` – polygon for crosswalk region (optional)
-- `TRAFFIC_LIGHT_ROI` – rectangular ROI for traffic light analysis (optional)
-- `YOLO_PERSON_CLASS` – class id used for `person` detections (default `0` for COCO)
-- `VIOLA_*` – Viola-Jones candidate ROI parameters before YOLO
+В этом режиме внутри ROI ищутся насыщенные красные и зеленые пиксели в HSV. Сигнал считается неизвестным, если ни один цвет не набрал достаточную долю или перевес.
 
-## YOLO (PyTorch)
-This template uses **Ultralytics** (PyTorch-based) as an optional pedestrian detector:
-- If `YOLO_MODEL` is set (e.g., `yolov8n.pt`), the container will download/cached weights inside the image layer during first run,
-  unless you mount a local `models/` directory and set a path.
+Параметры режима `color`:
 
-Suggested approach:
-- Put weights into `models/` and set `YOLO_MODEL=/app/models/yolov8n.pt`
+| Параметр | Назначение |
+| --- | --- |
+| `TL_COLOR_FRACTION_T` | минимальная доля цветных пикселей в ROI |
+| `TL_COLOR_MARGIN` | требуемый перевес ведущего цвета |
+| `TL_COLOR_MIN_S` | минимальная насыщенность HSV |
+| `TL_COLOR_MIN_V` | минимальная яркость HSV |
+| `TRAFFIC_LIGHT_INVERTED` | `1` – зеленый считается запрещающим сигналом |
 
-## Development with PyCharm
-PyCharm can use Docker Compose as an interpreter:
-- Settings → Python Interpreter → Add → Docker Compose
-- Choose `docker-compose.yml`, service `app`
+Режим из расчетной части ВКР включается так:
 
-## Project layout
-```
-src/
-  main.py            # entry point
-  config.py          # environment config
-  pipeline.py        # orchestration
-  preprocessing/     # image enhancement
-  detectors/         # pedestrian + traffic light
+```env
+TL_DETECTION_MODE=brightness
 ```
 
-## Notes
-- Background subtraction and combined processing modes are visible in the UI as reserved controls; they are not bound to an algorithm yet.
-- If `YOLO_MODEL` is empty, the pedestrian detector returns no detections.
-
-
-## Web UI
-Run with Docker Compose and open in browser:
-- http://localhost:8000
-
-The UI allows selecting:
-- Crosswalk zone as a polygon
-- Pedestrian traffic light ROI as a rectangle
-- Preprocessing toggles and main analysis parameters
-
-Calibration is stored in `runtime/calibration.json`.
-
-
-## UI additions (v2)
-- Crosswalk can be any polygon (>=3 points). Add points by clicking, then press 'Save polygon'.
-- Traffic-light inversion can be used to treat green as the forbidden signal for demo videos.
-- Playback controls: pause/resume; restart for file sources.
-
-
-## Performance tuning
-- PROCESS_STRIDE: run preprocessing + Viola-Jones + YOLO only on every N-th source frame.
-  Example: `PROCESS_STRIDE=6` gives about 5 processed FPS from a 30 FPS input stream.
-- DISPLAY_PREPROCESSED: show the preprocessed selected frame in the single MJPEG stream.
-- OUTPUT_MAX_FPS: limit MJPEG streaming FPS if CPU-bound on JPEG.
-- JPEG_QUALITY: quality for MJPEG stream.
-
-If UI controls seem unresponsive after updates, do a hard refresh (Ctrl+F5) to bypass cached JS.
-
-## Traffic light detection (ROI)
-`TL_DETECTION_MODE=color` is the practical default. It searches for saturated red and green
-pixels inside the traffic-light ROI and treats the signal as `UNKNOWN` when neither color is
-dominant enough. This prevents a random bright ROI from immediately becoming "red".
-
-For the thesis brightness mode, set `TL_DETECTION_MODE=brightness`; then the pedestrian light
-state follows the documented formula:
+Формула яркости:
 
 ```text
 Y(x,y) = 0.299R(x,y) + 0.587G(x,y) + 0.114B(x,y)
 Y* = mean(Y over ROI)
 red if Y* >= TL_BRIGHTNESS_T
+green if Y* < TL_BRIGHTNESS_T
 ```
 
-Green demo inversion is controlled by the UI button "Инвертировать цвет светофора" or
-`TRAFFIC_LIGHT_INVERTED=1`; in that mode crossing on green is classified as a violation.
-Set ROI in the UI.
+Порог по умолчанию:
 
-## MJPEG stream performance
-If UI FPS is much lower than source FPS, set `STREAM_MAX_WIDTH` (e.g., 480) to downscale frames before JPEG encoding.
+```env
+TL_BRIGHTNESS_T=60
+```
 
-## FPS semantics (v7)
-- output_fps: how fast the browser receives processed MJPEG frames.
-- process_fps: how many selected source frames reach preprocessing + rule evaluation.
-- ped_detect_fps: how often YOLO actually runs; by default it matches the selected-frame analysis rate.
+## Модели и локальные данные
 
-## Crosswalk membership
-A pedestrian is considered inside the crosswalk if the *bottom edge* of their bbox lies inside the polygon (approximated by bottom-left/center/right points).
+`YOLO_MODEL=yolov8n.pt` позволяет Ultralytics загрузить веса при первом запуске. Если нужна локальная фиксированная модель, положите файл в `models/` и укажите путь:
+
+```env
+YOLO_MODEL=/app/models/yolov8n.pt
+```
+
+Папка `models/` примонтирована в Docker Compose, но игнорируется Git. То же относится к локальным видео в `input_data/`, кроме демонстрационного `input_data/test.mp4`.
+
+## Структура проекта
+
+```text
+src/
+  config.py                 настройки из .env
+  main.py                   простой CLI-запуск пайплайна
+  pipeline.py               основная логика анализа кадра
+  detectors/
+    pedestrian.py           YOLO-детектор пешеходов
+    traffic_light.py        определение сигнала светофора
+    viola_jones.py          ROI-кандидаты Viola–Jones
+  preprocessing/
+    preprocess.py           сборка этапов предобработки
+    gaussian.py             гауссово размытие
+    hist_equalization.py    гистограммное выравнивание
+    homomorphic.py          гомоморфная фильтрация
+  web/
+    app.py                  FastAPI-приложение и API
+    config_store.py         хранение калибровки UI
+    framehub.py             фоновая обработка и MJPEG-поток
+    static/                 HTML, CSS и JS интерфейса
+docker/
+  Dockerfile                Docker-образ приложения
+docker-compose.yml          запуск веб-приложения
+.env.example                пример локальной конфигурации
+requirements.txt            Python-зависимости
+```
