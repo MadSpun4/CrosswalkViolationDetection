@@ -71,6 +71,10 @@ class Settings:
     yolo_model: str
     yolo_conf: float
     yolo_person_class: int
+    yolo_batch_size: int
+    yolo_roi_merge_iou: float
+    yolo_roi_merge_gap: int
+    yolo_max_rois_per_frame: int
 
     # ROI-кандидаты Viola-Jones
     viola_cascade_path: str
@@ -115,6 +119,10 @@ class Settings:
             yolo_model=_env_str("YOLO_MODEL", ""),
             yolo_conf=_env_float("YOLO_CONF", 0.35),
             yolo_person_class=_env_int("YOLO_PERSON_CLASS", 0),
+            yolo_batch_size=max(1, _env_int("YOLO_BATCH_SIZE", 16)),
+            yolo_roi_merge_iou=max(0.0, _env_float("YOLO_ROI_MERGE_IOU", 0.10)),
+            yolo_roi_merge_gap=max(0, _env_int("YOLO_ROI_MERGE_GAP", 24)),
+            yolo_max_rois_per_frame=max(1, _env_int("YOLO_MAX_ROIS_PER_FRAME", 1)),
 
             viola_cascade_path=_env_str("VIOLA_CASCADE_PATH", ""),
             viola_scale_factor=_env_float("VIOLA_SCALE_FACTOR", 1.1),

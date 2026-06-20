@@ -121,8 +121,6 @@ Python и системные зависимости OpenCV устанавлив�
 
 ## Определение сигнала светофора
 
-Практический режим по умолчанию:
-
 ```env
 TL_DETECTION_MODE=color
 ```
@@ -138,27 +136,6 @@ TL_DETECTION_MODE=color
 | `TL_COLOR_MIN_S` | минимальная насыщенность HSV |
 | `TL_COLOR_MIN_V` | минимальная яркость HSV |
 | `TRAFFIC_LIGHT_INVERTED` | `1` – зеленый считается запрещающим сигналом |
-
-Режим из расчетной части ВКР включается так:
-
-```env
-TL_DETECTION_MODE=brightness
-```
-
-Формула яркости:
-
-```text
-Y(x,y) = 0.299R(x,y) + 0.587G(x,y) + 0.114B(x,y)
-Y* = mean(Y over ROI)
-red if Y* >= TL_BRIGHTNESS_T
-green if Y* < TL_BRIGHTNESS_T
-```
-
-Порог по умолчанию:
-
-```env
-TL_BRIGHTNESS_T=60
-```
 
 ## Модели и локальные данные
 
